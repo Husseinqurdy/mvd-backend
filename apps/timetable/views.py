@@ -310,13 +310,13 @@ class LecturerSessionsViewSet(viewsets.ViewSet):
         user = request.user
         name_parts = user.full_name.strip().split()
 
-        # Build comprehensive query
+        # Strategy: match full name, then only parts longer than 2 chars.
+        # This prevents single-letter initials like "D" from matching everyone.
+        # e.g. "Bynite D" -> matches "Bynite" (5 chars) but NOT "D" (1 char)
         queries = Q(lecturer_name__icontains=user.full_name)
-        if len(name_parts) >= 1:
-            queries |= Q(lecturer_name__icontains=name_parts[-1])  # surname
-        if len(name_parts) >= 2:
-            queries |= Q(lecturer_name__icontains=name_parts[0])   # first name
-            queries |= Q(lecturer_name__icontains=f"{name_parts[-1]}, {name_parts[0]}")
+        for part in name_parts:
+            if len(part) > 2:
+                queries |= Q(lecturer_name__icontains=part)
 
         try:
             period = AcademicPeriod.objects.get(is_active=True)
