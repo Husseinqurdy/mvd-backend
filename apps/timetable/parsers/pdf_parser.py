@@ -1,6 +1,9 @@
 """
 Parses MUST timetable PDFs.
 Returns list of ParsedPage objects.
+
+Key fix: consecutive slots of the same course+venue+day+group are MERGED
+into one session. e.g. 7:30-8:15 + 8:15-9:45 = 7:30-9:45 (one session).
 """
 import re
 from dataclasses import dataclass, field
@@ -158,20 +161,68 @@ def _parse_venues(text: str) -> list:
     return venues
 
 
+def _merge_slots(slots: list) -> list:
+    """
+    Merge consecutive time slots that belong to the same session.
+
+    The MUST PDF splits a session like 7:30-9:45 into multiple rows:
+      7:30-8:15  CS101|LH1
+      8:15-9:00  CS101|LH1
+      9:00-9:45  CS101|LH1
+
+    This function detects rows where:
+      - Same day, course_code, venue_code, group
+      - Previous slot's end_time == current slot's start_time  (consecutive)
+
+    And merges them into a single slot: 7:30-9:45
+    """
+    if not slots:
+        return slots
+
+    merged = [slots[0]]
+    for slot in slots[1:]:
+        prev = merged[-1]
+        is_same = (
+            prev.day         == slot.day
+            and prev.course_code == slot.course_code
+            and prev.venue_code  == slot.venue_code
+            and prev.group       == slot.group
+            and prev.end_time    == slot.start_time   # strictly consecutive
+        )
+        if is_same:
+            # Extend previous slot to cover current slot's end_time
+            merged[-1] = ParsedSlot(
+                day=prev.day,
+                start_time=prev.start_time,
+                end_time=slot.end_time,
+                course_code=prev.course_code,
+                venue_code=prev.venue_code,
+                group=prev.group,
+                is_cross=prev.is_cross,
+            )
+        else:
+            merged.append(slot)
+
+    return merged
+
+
 def _parse_page(page) -> Optional[ParsedPage]:
     text = page.extract_text() or ''
     if 'MBEYA UNIVERSITY' not in text.upper():
         return None
+
     hdr     = _parse_header(text)
     modules = _parse_modules(text)
     venues  = _parse_venues(text)
     slots   = []
-    table   = page.extract_table()
+
+    table = page.extract_table()
     if table and table[0]:
         day_cols = {}
         for ci, cell in enumerate(table[0]):
             if cell and cell.strip().lower() in DAY_MAP:
                 day_cols[ci] = DAY_MAP[cell.strip().lower()]
+
         for row in table[1:]:
             if not row or not row[0]:
                 continue
@@ -193,6 +244,13 @@ def _parse_page(page) -> Optional[ParsedPage]:
                     course_code=course, venue_code=venue_code,
                     group=group, is_cross=cross,
                 ))
+
+    # Sort by day then start_time before merging — critical for merge to work
+    slots.sort(key=lambda s: (s.day, s.start_time))
+
+    # Merge consecutive slots of same course+venue+day+group into one session
+    slots = _merge_slots(slots)
+
     return ParsedPage(
         college=hdr['college'], department=hdr['department'],
         program=hdr['program'], uqf_level=hdr['uqf_level'],
