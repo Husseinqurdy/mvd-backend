@@ -98,7 +98,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 20,
+    'PAGE_SIZE': 50,
 }
 
 # ─── JWT ─────────────────────────────────────────────────────────────────────
@@ -141,4 +141,7 @@ USE_TZ = True
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-
+# ── Performance / Upload limits ───────────────────────────────────────────────
+# Allow large PDF uploads (up to 50MB)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 52_428_800   # 50 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 52_428_800   # 50 MB

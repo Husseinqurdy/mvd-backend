@@ -1,4 +1,7 @@
-from django.utils import timezone
+"""
+Timetable importer — PDF and Excel/CSV.
+Commits in batches of 50 to avoid long-running transactions that kill gunicorn workers.
+"""
 from django.db import transaction
 from apps.venues.models import Building, Venue
 from apps.timetable.models import (
@@ -55,24 +58,45 @@ def _program(prog_name, dept_name, college_name, uqf):
     col, _   = College.objects.get_or_create(name=college_name, defaults={'code': col_code})
     dep_code = ''.join(w[0] for w in dept_name.split()[:4]).upper() or 'DEPT'
     dep, _   = Department.objects.get_or_create(name=dept_name, defaults={'college': col, 'code': dep_code})
-    lvl = {6: 'DIPLOMA', 7: 'DIPLOMA', 8: 'BSC', 9: 'MSC'}.get(uqf, 'BSC')
-    p_code = ''.join(w[0] for w in prog_name.split()[:5]).upper() + f'-UQF{uqf}'
-    prog, _ = Program.objects.get_or_create(
+    lvl      = {6: 'DIPLOMA', 7: 'DIPLOMA', 8: 'BSC', 9: 'MSC'}.get(uqf, 'BSC')
+    p_code   = ''.join(w[0] for w in prog_name.split()[:5]).upper() + f'-UQF{uqf}'
+    prog, _  = Program.objects.get_or_create(
         code=p_code,
         defaults={'department': dep, 'name': prog_name, 'level': lvl, 'uqf_level': uqf},
     )
     return prog
 
 
-@transaction.atomic
+def _commit_batch(batch: list, s: dict):
+    """Insert a batch of TimetableSession dicts in one transaction."""
+    if not batch:
+        return
+    with transaction.atomic():
+        for kw in batch:
+            try:
+                TimetableSession.objects.create(**kw)
+                s['sessions_created'] += 1
+            except Exception as e:
+                s['errors'].append(str(e)[:120])
+                s['sessions_skipped'] += 1
+
+
+# ── PDF Import ────────────────────────────────────────────────────────────────
+
 def import_pdf(pages: list, period: AcademicPeriod, user, replace=False) -> dict:
     s = {'sessions_created': 0, 'sessions_skipped': 0, 'venues_created': 0, 'errors': []}
+
+    # Delete old sessions outside of long transaction
     if replace:
         TimetableSession.objects.filter(period=period, import_source='pdf').delete()
+
+    batch = []
+    BATCH_SIZE = 50
 
     for page in pages:
         vdefs   = {v.code: v for v in page.venues}
         mod_map = {m.course_code: m for m in page.modules}
+
         try:
             prog = _program(
                 page.program or 'Unknown Program',
@@ -100,7 +124,7 @@ def import_pdf(pages: list, period: AcademicPeriod, user, replace=False) -> dict
                 s['sessions_skipped'] += 1
                 continue
 
-            mod = mod_map.get(slot.course_code)
+            # Check duplicate
             exists = TimetableSession.objects.filter(
                 period=period, venue=venue, day_of_week=slot.day,
                 start_time=slot.start_time, course_code=slot.course_code,
@@ -110,7 +134,8 @@ def import_pdf(pages: list, period: AcademicPeriod, user, replace=False) -> dict
                 s['sessions_skipped'] += 1
                 continue
 
-            TimetableSession.objects.create(
+            mod = mod_map.get(slot.course_code)
+            batch.append(dict(
                 period=period, program=prog, year_of_study=page.year_of_study,
                 course_code=slot.course_code,
                 course_name=mod.course_name if mod else '',
@@ -119,8 +144,14 @@ def import_pdf(pages: list, period: AcademicPeriod, user, replace=False) -> dict
                 start_time=slot.start_time, end_time=slot.end_time,
                 group=slot.group, is_cross_cutting=slot.is_cross,
                 is_active=True, import_source='pdf',
-            )
-            s['sessions_created'] += 1
+            ))
+
+            if len(batch) >= BATCH_SIZE:
+                _commit_batch(batch, s)
+                batch = []
+
+    # Remaining
+    _commit_batch(batch, s)
 
     TimetableImportLog.objects.create(
         imported_by=user, source='pdf', period=period,
@@ -128,51 +159,90 @@ def import_pdf(pages: list, period: AcademicPeriod, user, replace=False) -> dict
         sessions_created=s['sessions_created'],
         sessions_skipped=s['sessions_skipped'],
         venues_created=s['venues_created'],
-        errors='\n'.join(s['errors'][:30]),
+        errors='\n'.join(s['errors'][:20]),
     )
     return s
 
 
-@transaction.atomic
+# ── Excel / CSV Import ────────────────────────────────────────────────────────
+
 def import_excel(rows: list, period: AcademicPeriod, user, source='excel', replace=False) -> dict:
     s = {'sessions_created': 0, 'sessions_skipped': 0, 'venues_created': 0, 'errors': []}
+
     if replace:
         TimetableSession.objects.filter(period=period, import_source=source).delete()
 
-    for row in rows:
+    batch = []
+    BATCH_SIZE = 50
+
+    for i, row in enumerate(rows):
         try:
-            venue, created = _venue(row.venue_code)
+            venue, created = _venue(
+                row.get('venue_code', '').strip(),
+                name=row.get('venue_name', ''),
+                wing=row.get('building', ''),
+                capacity=int(row.get('capacity', 0) or 0),
+            )
             if created:
                 s['venues_created'] += 1
         except Exception as e:
-            s['errors'].append(f'Venue {row.venue_code}: {e}')
+            s['errors'].append(f'Row {i+2} venue: {e}')
             s['sessions_skipped'] += 1
             continue
 
-        prog = None
-        if row.program_code:
+        try:
+            prog = _program(
+                row.get('program', 'Unknown Program'),
+                row.get('department', 'Unknown Department'),
+                row.get('college', 'Unknown College'),
+                int(row.get('uqf_level', 8) or 8),
+            )
+        except Exception as e:
+            s['errors'].append(f'Row {i+2} program: {e}')
+            s['sessions_skipped'] += 1
+            continue
+
+        from datetime import time as dt_time
+        def _t(v):
+            if isinstance(v, dt_time):
+                return v
             try:
-                prog = Program.objects.get(code=row.program_code)
-            except Program.DoesNotExist:
-                pass
+                parts = str(v).strip().split(':')
+                return dt_time(int(parts[0]), int(parts[1]))
+            except Exception:
+                return dt_time(7, 30)
 
         exists = TimetableSession.objects.filter(
-            period=period, venue=venue, day_of_week=row.day,
-            start_time=row.start_time, course_code=row.course_code, group=row.group,
+            period=period, venue=venue,
+            day_of_week=int(row.get('day_of_week', 1) or 1),
+            start_time=_t(row.get('start_time')),
+            course_code=str(row.get('course_code', '')).strip(),
+            group=str(row.get('group', '')).strip(),
         ).exists()
         if exists:
             s['sessions_skipped'] += 1
             continue
 
-        TimetableSession.objects.create(
-            period=period, program=prog, year_of_study=row.year_of_study,
-            course_code=row.course_code, course_name=row.course_name,
-            lecturer_name=row.lecturer_name, venue=venue, day_of_week=row.day,
-            start_time=row.start_time, end_time=row.end_time,
-            group=row.group, is_cross_cutting=row.is_cross,
+        batch.append(dict(
+            period=period, program=prog,
+            year_of_study=int(row.get('year_of_study', 1) or 1),
+            course_code=str(row.get('course_code', '')).strip(),
+            course_name=str(row.get('course_name', '')).strip(),
+            lecturer_name=str(row.get('lecturer_name', '')).strip(),
+            venue=venue,
+            day_of_week=int(row.get('day_of_week', 1) or 1),
+            start_time=_t(row.get('start_time')),
+            end_time=_t(row.get('end_time')),
+            group=str(row.get('group', '')).strip(),
+            is_cross_cutting=bool(row.get('is_cross_cutting', False)),
             is_active=True, import_source=source,
-        )
-        s['sessions_created'] += 1
+        ))
+
+        if len(batch) >= BATCH_SIZE:
+            _commit_batch(batch, s)
+            batch = []
+
+    _commit_batch(batch, s)
 
     TimetableImportLog.objects.create(
         imported_by=user, source=source, period=period,
@@ -180,6 +250,6 @@ def import_excel(rows: list, period: AcademicPeriod, user, source='excel', repla
         sessions_created=s['sessions_created'],
         sessions_skipped=s['sessions_skipped'],
         venues_created=s['venues_created'],
-        errors='\n'.join(s['errors'][:30]),
+        errors='\n'.join(s['errors'][:20]),
     )
     return s
