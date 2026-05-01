@@ -75,24 +75,44 @@ def _parse_time(s: str) -> Optional[time]:
 
 
 def _parse_cell(cell: str):
-    """Parse a timetable cell like 'IT 6125 | Comp. LAB 02 *' """
+    """Parse a timetable cell like 'IT 6125 | Comp. LAB 02 *'
+    
+    The word-based parser may grab extra words from adjacent columns.
+    We stop at the first occurrence of another course code pattern
+    after the venue part to avoid contamination.
+    """
     cell = cell.strip()
     if not cell or 'BREAK' in cell.upper():
         return None
-    is_cross = cell.endswith('*')
-    cell = cell.rstrip('* ').strip()
+    is_cross = '*' in cell
+    cell = cell.replace('*', '').strip()
     if '|' not in cell:
         return None
     parts = cell.split('|', 1)
-    course = parts[0].strip().upper()
+    course_raw = parts[0].strip().upper()
+    # Validate course code: letters + digits, e.g. "IT 6125", "CS 8117", "BM 6117"
+    if not re.match(r'^[A-Z]{2,4}\s?\d{3,4}', course_raw):
+        return None
+    course = re.match(r'^([A-Z]{2,4}\s?\d{3,4})', course_raw).group(1).strip()
+    
     venue_part = parts[1].strip()
     group = ''
     gm = GROUP_RE.search(venue_part)
     if gm:
         group = gm.group(0).upper()
         venue_part = venue_part[:gm.start()].strip()
-    # Normalize venue code
-    venue_code = re.sub(r'\s+', ' ', venue_part.upper()).strip().rstrip('.')
+    
+    # Stop at any new course code pattern (letters+digits) that might bleed in
+    # e.g. "207-A IT 8309" -> stop before "IT 8309"
+    bleed = re.search(r'\s+[A-Z]{2,4}\s?\d{3,4}', venue_part)
+    if bleed:
+        venue_part = venue_part[:bleed.start()].strip()
+    
+    # Remove trailing dots and normalize spaces
+    venue_code = re.sub(r'\s+', ' ', venue_part.upper()).strip().rstrip('.').strip()
+    
+    if not venue_code or not course:
+        return None
     return course, venue_code, group, is_cross
 
 
