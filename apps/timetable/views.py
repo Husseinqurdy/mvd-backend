@@ -353,3 +353,30 @@ class LecturerSessionsViewSet(viewsets.ViewSet):
                 'lecturer_name': s.lecturer_name,
             })
         return Response(result)
+
+
+# ── Debug: check day distribution ────────────────────────────────────────────
+from rest_framework.decorators import api_view, permission_classes as pc
+from rest_framework.permissions import IsAuthenticated
+
+@api_view(['GET'])
+@pc([IsAuthenticated])
+def debug_days(request):
+    """GET /api/timetable/debug-days/ — shows session count per day for active period"""
+    from apps.timetable.models import TimetableSession, AcademicPeriod
+    from django.db.models import Count
+    try:
+        period = AcademicPeriod.objects.get(is_active=True)
+    except AcademicPeriod.DoesNotExist:
+        return Response({'error': 'No active period'})
+
+    counts = (TimetableSession.objects
+              .filter(period=period, is_active=True)
+              .values('day_of_week')
+              .annotate(count=Count('id'))
+              .order_by('day_of_week'))
+    return Response({
+        'period': period.name,
+        'total': TimetableSession.objects.filter(period=period, is_active=True).count(),
+        'by_day': list(counts),
+    })

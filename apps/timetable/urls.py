@@ -16,3 +16,6 @@ router.register('import',        ImportViewSet,              basename='import')
 router.register('cancellations', CancelSessionViewSet,       basename='cancellation')
 router.register('lecturer',      LecturerSessionsViewSet,    basename='lecturer')
 urlpatterns = [path('', include(router.urls))]
+
+from apps.timetable.views import debug_days
+urlpatterns += [path('debug-days/', debug_days)]

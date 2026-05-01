@@ -216,7 +216,35 @@ def _parse_page(page) -> Optional[ParsedPage]:
     venues  = _parse_venues(text)
     slots   = []
 
-    table = page.extract_table()
+    # Use explicit table settings to ensure all columns are captured
+    table_settings = {
+        "vertical_strategy":   "lines",
+        "horizontal_strategy": "lines",
+        "snap_tolerance":      5,
+        "join_tolerance":      3,
+        "edge_min_length":     3,
+        "min_words_vertical":  1,
+        "min_words_horizontal": 1,
+    }
+    table = page.extract_table(table_settings)
+    # Fallback: try with text strategy if lines strategy misses columns
+    if not table or not any(
+        cell and cell.strip().lower() in DAY_MAP
+        for cell in (table[0] if table else [])
+    ):
+        table = page.extract_table({
+            "vertical_strategy":   "text",
+            "horizontal_strategy": "lines",
+        })
+    if not table or not any(
+        cell and cell.strip().lower() in DAY_MAP
+        for cell in (table[0] if table else [])
+    ):
+        table = page.extract_table({
+            "vertical_strategy":   "lines",
+            "horizontal_strategy": "text",
+        })
+
     if table and table[0]:
         day_cols = {}
         for ci, cell in enumerate(table[0]):
