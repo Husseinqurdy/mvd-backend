@@ -85,15 +85,19 @@ def _parse_cell(cell: str):
     if not cell or 'BREAK' in cell.upper():
         return None
     is_cross = '*' in cell
+    # Remove ALL asterisks (they may appear before OR after course code)
+    # e.g. "* ME 6316 | 109-C *" or "ME 6316 | 109-C *"
     cell = cell.replace('*', '').strip()
     if '|' not in cell:
         return None
     parts = cell.split('|', 1)
     course_raw = parts[0].strip().upper()
     # Validate course code: letters + digits, e.g. "IT 6125", "CS 8117", "BM 6117"
-    if not re.match(r'^[A-Z]{2,4}\s?\d{3,4}', course_raw):
+    # Also handle unusual codes like "ME 61124" (5 digits) or "BPP 845"
+    m = re.match(r'^[A-Z]{2,4}\s?\d{3,5}', course_raw)
+    if not m:
         return None
-    course = re.match(r'^([A-Z]{2,4}\s?\d{3,4})', course_raw).group(1).strip()
+    course = m.group(0).strip()
     
     venue_part = parts[1].strip()
     group = ''
@@ -157,7 +161,7 @@ def _parse_modules(text: str) -> List[ParsedModule]:
         if not in_modules or not ls:
             continue
         # Pattern: "IT 6125 - Computerized Accounting | Nyambo N"
-        m = re.match(r'([A-Z]{2,4}\s?\d{3,4}(?:\s[A-Z]+)?)\s*[-–]\s*(.+?)\s*\|\s*(.+)', ls, re.I)
+        m = re.match(r'([A-Z]{2,4}\s?\d{3,5}(?:\s[A-Z]+)?)\s*[-–]\s*(.+?)\s*\|\s*(.+)', ls, re.I)
         if m:
             mods.append(ParsedModule(
                 course_code=m.group(1).strip().upper(),
